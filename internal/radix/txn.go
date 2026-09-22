@@ -317,16 +317,23 @@ func (t *Txn) ownPath(path []pathEntry) {
 	}
 }
 
-// unlink removes the child at the end of an owned path from its parent and
-// restores the tree's shape: a node left with no value and a single child is
-// merged with that child. The root is exempt.
+// unlink removes the child at the end of a root-to-parent path from its
+// parent, making the path owned, and restores the tree's shape: a parent left
+// with no value and a single child is merged with that child -- directly, not
+// copied first only to be replaced. The root is exempt.
 func (t *Txn) unlink(path []pathEntry) {
 	last := len(path) - 1
-	parent := path[last].n
-	parent.delKid(path[last].idx)
-	if last > 0 && parent.leaf == nil && parent.kidCount() == 1 {
-		t.mergeChild(path[last-1].n, path[last-1].idx, parent)
+	parent, idx := path[last].n, path[last].idx
+	if last > 0 && parent.leaf == nil && parent.kidCount() == 2 {
+		t.ownPath(path[:last])
+		if !t.owns(parent) {
+			t.dropNode(parent)
+		}
+		t.mergeChild(path[last-1].n, path[last-1].idx, parent, parent.kid(1-idx))
+		return
 	}
+	t.ownPath(path)
+	path[last].n.delKid(idx)
 }
 
 // Delete removes k and returns its value. Deleting a missing key leaves the
@@ -356,38 +363,45 @@ func (t *Txn) Delete(k []byte) (any, bool) {
 	old := n.val
 
 	t.begin()
-	t.ownPath(path)
 	switch {
 	case len(path) == 0:
 		// The root is never removed or merged.
 		t.clearLeaf(t.own(nil, 0, n, 0))
 	case n.childless():
 		// The node disappears altogether.
-		if !t.owns(n) {
-			t.dropNode(n)
-			t.dropLeaf(n.leaf)
-		} else if n.epoch&leafOwnedBit == 0 {
-			t.dropLeaf(n.leaf)
-		}
+		t.dropWithLeaf(n)
 		t.unlink(path)
+	case n.kidCount() == 1:
+		// Left with no value and a single child: merged with the child,
+		// without being copied first.
+		t.ownPath(path)
+		t.dropWithLeaf(n)
+		t.mergeChild(path[len(path)-1].n, path[len(path)-1].idx, n, n.kid(0))
 	default:
-		parent, pidx := path[len(path)-1].n, path[len(path)-1].idx
-		n = t.own(parent, pidx, n, 0)
-		t.clearLeaf(n)
-		if n.kidCount() == 1 {
-			t.mergeChild(parent, pidx, n)
-		}
+		t.ownPath(path)
+		t.clearLeaf(t.own(path[len(path)-1].n, path[len(path)-1].idx, n, 0))
 	}
 	return old, true
 }
 
-// mergeChild replaces the owned, leafless node n -- which sits at
-// parent.kids[pidx] and has exactly one child -- with that child, whose path
-// segment absorbs n's. The child keeps its leaf object, so the watchers of
-// that key are not disturbed; the child node itself is replaced (and its
-// watchers notified) unless this transaction owns it.
-func (t *Txn) mergeChild(parent *node, pidx int, n *node) {
-	c := n.kid(0)
+// dropWithLeaf records n and its leaf as leaving the tree, as far as anybody
+// else can have seen them.
+func (t *Txn) dropWithLeaf(n *node) {
+	if !t.owns(n) {
+		t.dropNode(n)
+		t.dropLeaf(n.leaf)
+	} else if n.epoch&leafOwnedBit == 0 {
+		t.dropLeaf(n.leaf)
+	}
+}
+
+// mergeChild replaces n -- which sits at parent.kids[pidx], has no leaf (or
+// is giving it up), and is left with the single child c -- with that child,
+// whose path segment absorbs n's. n itself must already be accounted for. The
+// child keeps its leaf object, so the watchers of that key are not disturbed;
+// the child node itself is replaced (and its watchers notified) unless this
+// transaction owns it. parent must be owned.
+func (t *Txn) mergeChild(parent *node, pidx int, n, c *node) {
 	var m *node
 	switch {
 	case c.childless():
@@ -444,7 +458,6 @@ func (t *Txn) DeletePrefix(prefix []byte) bool {
 		t.root = &node{epoch: t.epoch}
 		return true
 	}
-	t.ownPath(path)
 	t.unlink(path)
 	return true
 }
