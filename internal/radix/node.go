@@ -129,21 +129,24 @@ func cloneSegment(s string) string {
 //
 // The shape of the function is dictated by the inliner's budget: it is called
 // once per level of every lookup and must stay inlinable, with the compact
-// check included. The lower words are summed in a loop rather than a switch
-// with fallthroughs, which costs the same at run time and a good deal less in
-// the inliner's accounting.
+// check included. Within that budget it avoids branching on the label, whose
+// word index is as unpredictable as the key: the label's own word is shifted
+// so that its bit lands on top, which answers both results at once, and the
+// first word is added without a branch -- shifted out of existence when the
+// label is in it, as Go defines a shift by 64 to give zero. Only labels of 128
+// and above loop over the words between.
 func (n *node) rank(label byte) (int, bool) {
 	if n.compact() {
 		return 0, false
 	}
 	w := label >> 6
-	bit := uint64(1) << (label & 63)
-	word := n.bitmap[w]
-	idx := bits.OnesCount64(word & (bit - 1))
-	for _, x := range n.bitmap[:w] {
-		idx += bits.OnesCount64(x)
+	x := n.bitmap[w] << (^label & 63)
+	idx := bits.OnesCount64(x<<1) + bits.OnesCount64(n.bitmap[0]<<((w-1)&64))
+	for w > 1 {
+		w--
+		idx += bits.OnesCount64(n.bitmap[w])
 	}
-	return idx, word&bit != 0
+	return idx, x>>63 != 0
 }
 
 // addKid inserts c at position idx. The node must be owned by the caller and

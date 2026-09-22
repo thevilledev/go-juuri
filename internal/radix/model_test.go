@@ -509,3 +509,30 @@ func TestDeepKeys(t *testing.T) {
 	}
 	checkTree(t, txn.Commit(), m, probes)
 }
+
+// TestRank checks rank against a plain count for every label, over bitmaps
+// that empty or fill whole words as well as random ones.
+func TestRank(t *testing.T) {
+	r := rand.New(rand.NewSource(1))
+	words := []uint64{0, ^uint64(0), 1, 1 << 63}
+	n := newNode(256)
+	for range 2000 {
+		for i := range n.bitmap {
+			if r.Intn(2) == 0 {
+				n.bitmap[i] = words[r.Intn(len(words))]
+			} else {
+				n.bitmap[i] = r.Uint64()
+			}
+		}
+		for label := range 256 {
+			want := 0
+			for l := range label {
+				want += int(n.bitmap[l>>6] >> (l & 63) & 1)
+			}
+			idx, ok := n.rank(byte(label))
+			if idx != want || ok != (n.bitmap[label>>6]>>(label&63)&1 != 0) {
+				t.Fatalf("bitmap %x: rank(%d) = %d,%v want %d", n.bitmap, label, idx, ok, want)
+			}
+		}
+	}
+}
