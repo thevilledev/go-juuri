@@ -42,14 +42,68 @@ import (
 // The value itself lives in the node (node.val), next to everything else a
 // lookup or an iteration step needs: reads never touch the leaf object unless
 // they ask for a watch.
+//
+// Most values are never watched, and most are never copied to another node
+// either, so the leaf is created lazily (see leafOf): only when a watcher asks
+// for it, or when a copy of the node must share it with the original. Until
+// then the value's identity is simply the one node that holds it. A node whose
+// value leaves the tree without ever having had a leaf gets sealedLeaf on
+// notification, so that a late watcher still finds it stale.
 type leaf struct {
 	watch watch.Slot
 }
 
-// leafOwnedBit is stolen from node.epoch. It records that the node's current
-// leaf was created in the node's own epoch, so it has never been visible to
-// anyone else and need not be tracked for notification when replaced again.
-const leafOwnedBit = uint64(1) << 63
+// sealedLeaf stands for every value that left a committed tree before anybody
+// needed its leaf.
+var sealedLeaf = func() *leaf {
+	l := &leaf{}
+	l.watch.Seal()
+	return l
+}()
+
+// Two bits are stolen from node.epoch. valueBit records that a key ends at the
+// node: node.val is meaningful. leafOwnedBit records that the value was stored
+// in the node's own epoch, so it has never been visible to anyone else -- its
+// leaf does not exist -- and need not be tracked for notification when replaced
+// again.
+const (
+	leafOwnedBit = uint64(1) << 63
+	valueBit     = uint64(1) << 62
+	epochMask    = valueBit - 1
+)
+
+// hasValue reports whether a key ends at n.
+func (n *node) hasValue() bool {
+	return n.epoch&valueBit != 0
+}
+
+// leafOf returns the leaf of n's value, creating it if nobody has needed it
+// yet. n must hold a value. It may be called on a published node, concurrently
+// with readers doing the same: the first leaf installed wins.
+func (n *node) leafOf() *leaf {
+	if l := n.leaf.Load(); l != nil {
+		return l
+	}
+	l := &leaf{}
+	if n.leaf.CompareAndSwap(nil, l) {
+		return l
+	}
+	return n.leaf.Load()
+}
+
+// sealValue seals the leaf of the value of n, a node that has left the tree:
+// the leaf's watchers are notified, and a leaf that was never created becomes
+// sealedLeaf, so that a watcher arriving through an old tree is notified too.
+func sealValue(n *node) {
+	l := n.leaf.Load()
+	if l == nil {
+		if n.leaf.CompareAndSwap(nil, sealedLeaf) {
+			return
+		}
+		l = n.leaf.Load() // a watcher got there first
+	}
+	l.watch.Seal()
+}
 
 // oneByte holds every one-byte string, so that the (very common) one-byte
 // path segments need no allocation.
@@ -149,7 +203,7 @@ func commonPrefixLen(a []byte, b string) int {
 // node's own key sorts before the keys of its children.
 func (n *node) minNode() *node {
 	for {
-		if n.leaf != nil {
+		if n.hasValue() {
 			return n
 		}
 		if n.kidCount() == 0 {
@@ -164,7 +218,7 @@ func (n *node) maxNode() *node {
 	for count := n.kidCount(); count > 0; count = n.kidCount() {
 		n = n.kid(count - 1)
 	}
-	if n.leaf == nil {
+	if !n.hasValue() {
 		return nil // only an empty root
 	}
 	return n

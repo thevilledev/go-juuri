@@ -35,7 +35,7 @@ func (t Tree) Get(k []byte) (any, bool) {
 		}
 		search = search[len(n.prefix):]
 	}
-	if n.leaf == nil {
+	if !n.hasValue() {
 		return nil, false
 	}
 	return n.val, true
@@ -61,10 +61,10 @@ func (t Tree) GetWatch(k []byte) (*watch.Slot, any, bool) {
 		}
 		search = search[len(n.prefix):]
 	}
-	if n.leaf == nil {
+	if !n.hasValue() {
 		return w, nil, false
 	}
-	return &n.leaf.watch, n.val, true
+	return &n.leafOf().watch, n.val, true
 }
 
 // LongestPrefix returns the value of the longest stored key that is a prefix
@@ -74,7 +74,7 @@ func (t Tree) LongestPrefix(k []byte) (any, bool) {
 	n := t.root
 	search := k
 	for {
-		if n.leaf != nil {
+		if n.hasValue() {
 			last = n
 		}
 		if len(search) == 0 {
@@ -158,7 +158,7 @@ func (t Tree) Len() int {
 
 func countLeaves(n *node) int {
 	c := 0
-	if n.leaf != nil {
+	if n.hasValue() {
 		c = 1
 	}
 	for _, k := range n.kidList() {

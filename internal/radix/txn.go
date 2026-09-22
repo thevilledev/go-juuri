@@ -15,8 +15,11 @@ var epochCounter atomic.Uint64
 // One Notifier may be shared by all the transactions that commit together.
 // It is not safe for concurrent use.
 type Notifier struct {
-	nodes    []*node
-	leaves   []*leaf
+	nodes  []*node
+	leaves []*leaf
+	// values are nodes that left the tree with their value, which may
+	// never have needed a leaf: see sealValue.
+	values   []*node
 	subtrees []*node
 }
 
@@ -33,30 +36,35 @@ func (nf *Notifier) Notify() {
 		l.watch.Seal()
 		nf.leaves[i] = nil
 	}
+	for i, n := range nf.values {
+		sealValue(n)
+		nf.values[i] = nil
+	}
 	for i, n := range nf.subtrees {
 		sealSubtree(n)
 		nf.subtrees[i] = nil
 	}
-	nf.nodes, nf.leaves, nf.subtrees = nf.nodes[:0], nf.leaves[:0], nf.subtrees[:0]
+	nf.nodes, nf.leaves, nf.values, nf.subtrees = nf.nodes[:0], nf.leaves[:0], nf.values[:0], nf.subtrees[:0]
 }
 
 // Reset forgets everything recorded without notifying anyone (abort).
 func (nf *Notifier) Reset() {
 	clear(nf.nodes)
 	clear(nf.leaves)
+	clear(nf.values)
 	clear(nf.subtrees)
-	nf.nodes, nf.leaves, nf.subtrees = nf.nodes[:0], nf.leaves[:0], nf.subtrees[:0]
+	nf.nodes, nf.leaves, nf.values, nf.subtrees = nf.nodes[:0], nf.leaves[:0], nf.values[:0], nf.subtrees[:0]
 }
 
 // pending reports how many objects are recorded. Used by tests.
 func (nf *Notifier) pending() int {
-	return len(nf.nodes) + len(nf.leaves) + len(nf.subtrees)
+	return len(nf.nodes) + len(nf.leaves) + len(nf.values) + len(nf.subtrees)
 }
 
 func sealSubtree(n *node) {
 	n.watch.Seal()
-	if n.leaf != nil {
-		n.leaf.watch.Seal()
+	if n.hasValue() {
+		sealValue(n)
 	}
 	for _, k := range n.kidList() {
 		sealSubtree(k)
@@ -120,7 +128,7 @@ func (t *Txn) begin() {
 }
 
 func (t *Txn) owns(n *node) bool {
-	return n.epoch&^leafOwnedBit == t.epoch
+	return n.epoch&epochMask == t.epoch
 }
 
 func (t *Txn) dropNode(n *node) {
@@ -129,10 +137,32 @@ func (t *Txn) dropNode(n *node) {
 	}
 }
 
+// dropLeaf records the leaf of a value that an owned node gives up. Such a
+// value came from a published node, whose leaf was created when the node was
+// copied (see shareLeaf).
 func (t *Txn) dropLeaf(l *leaf) {
 	if t.nf != nil {
 		t.nf.leaves = append(t.nf.leaves, l)
 	}
+}
+
+// dropValue records the value of n, a published node that leaves the tree
+// with it. Its leaf may not exist; Notify then seals it with sealedLeaf.
+func (t *Txn) dropValue(n *node) {
+	if t.nf != nil {
+		t.nf.values = append(t.nf.values, n)
+	}
+}
+
+// shareLeaf returns the leaf a copy of n, which must hold a value, is to carry.
+// A published node's copy must share the leaf with it, so that a watcher of
+// either one is notified when the value changes; an owned node's copy replaces
+// the node outright, and takes whatever it has.
+func (t *Txn) shareLeaf(n *node) *leaf {
+	if t.owns(n) {
+		return n.leaf.Load()
+	}
+	return n.leafOf()
 }
 
 func (t *Txn) dropSubtree(n *node) {
@@ -145,32 +175,47 @@ func (t *Txn) dropSubtree(n *node) {
 // child slice is always a fresh array: an owned node grows its slice in place,
 // which must never be visible through the original.
 func (t *Txn) copyNode(n *node, extra int) *node {
+	c := t.copyShape(n, extra)
+	if n.hasValue() {
+		c.val = n.val
+		c.epoch |= valueBit
+		if l := t.shareLeaf(n); l != nil {
+			c.leaf.Store(l)
+		}
+	}
+	return c
+}
+
+// copyShape is copyNode without the value: the copy has n's path segment and
+// children only.
+func (t *Txn) copyShape(n *node, extra int) *node {
 	count := n.kidCount()
-	if count+extra == 0 {
+	var c *node
+	switch {
+	case count+extra == 0:
 		// Childless stays childless: the copy gets its own inline segment.
-		c := newLeafNode(n.prefix, "")
-		c.epoch, c.val, c.leaf = t.epoch, n.val, n.leaf
-		return c
-	}
-	c := newNode(count + extra)
-	c.epoch, c.val, c.leaf, c.prefix = t.epoch, n.val, n.leaf, n.prefix
-	if n.kidCap() == 0 {
+		c = newLeafNode(n.prefix, "")
+	case n.kidCap() == 0:
 		// n may hold its segment inline -- in the very bytes of the bitmap,
-		// if it is a compact leaf; sharing it would keep n alive. Its bitmap
-		// is zero or not a bitmap at all, and c's is already zero.
+		// if it is a compact leaf; sharing it would keep n alive. It has no
+		// children, and its bitmap is zero or not a bitmap at all; c's is
+		// already zero.
+		c = newNode(extra)
 		c.prefix = cloneSegment(n.prefix)
-	} else {
-		c.bitmap = n.bitmap
+	default:
+		c = newNode(count + extra)
+		c.prefix, c.bitmap = n.prefix, n.bitmap
+		c.setKidCount(count)
+		copy(c.kidList(), n.kidList())
 	}
-	c.setKidCount(count)
-	copy(c.kidList(), n.kidList())
+	c.epoch = t.epoch
 	return c
 }
 
 // leafNode returns a new owned node holding only a value.
 func (t *Txn) leafNode(prefix []byte, v any) *node {
 	n := newLeafNode(bytesToString(prefix), "")
-	n.epoch, n.val, n.leaf = t.epoch|leafOwnedBit, v, &leaf{}
+	n.epoch, n.val = t.epoch|valueBit|leafOwnedBit, v
 	return n
 }
 
@@ -192,38 +237,68 @@ func (t *Txn) own(parent *node, pidx int, n *node, extra int) *node {
 		c = t.copyNode(n, extra)
 		t.dropNode(n)
 	}
-	if parent == nil {
-		t.root = c
-	} else {
-		parent.setKid(pidx, c)
-	}
+	t.link(parent, pidx, c)
 	return c
 }
 
-// setLeaf stores v in the owned node n.
-func (t *Txn) setLeaf(n *node, v any) (any, bool) {
-	old, existed := n.val, n.leaf != nil
-	n.val = v
-	if existed && n.epoch&leafOwnedBit != 0 {
-		// The leaf was created by this transaction in this epoch: nobody
-		// can have seen or watched it, so it can stand for the new value.
-		return old, true
+// link puts the owned node c at parent.kids[pidx], or makes it the root.
+func (t *Txn) link(parent *node, pidx int, c *node) {
+	if parent == nil {
+		t.root = c
+	} else {
+		parent.setKid(pidx, c) // same label as before: bitmap unchanged
 	}
-	if existed {
-		t.dropLeaf(n.leaf)
-	}
-	n.leaf = &leaf{}
-	n.epoch |= leafOwnedBit
-	return old, existed
 }
 
-// clearLeaf removes the leaf of the owned node n.
-func (t *Txn) clearLeaf(n *node) {
-	if n.epoch&leafOwnedBit == 0 {
-		t.dropLeaf(n.leaf)
+// releaseValue records that the value of n leaves the tree: n is about to be
+// removed, or replaced by a node without it.
+func (t *Txn) releaseValue(n *node) {
+	switch {
+	case !t.owns(n):
+		t.dropValue(n)
+	case n.epoch&leafOwnedBit == 0:
+		// Stored before this epoch: the value of a published node, whose
+		// leaf the copy made in this epoch created (see shareLeaf).
+		t.dropLeaf(n.leaf.Load())
 	}
-	n.val, n.leaf = nil, nil
-	n.epoch &^= leafOwnedBit
+}
+
+// ownValueless is own for a node about to lose its value: it returns an owned
+// node with n's path segment and children but no value. A published n is not
+// copied with the value only to drop it again: its copy never shares the
+// leaf, and n itself is recorded as leaving the tree with the value.
+func (t *Txn) ownValueless(parent *node, pidx int, n *node) *node {
+	if n.hasValue() {
+		t.releaseValue(n)
+	}
+	if t.owns(n) {
+		if n.leaf.Load() != nil {
+			n.leaf.Store(nil)
+		}
+		n.val = nil
+		n.epoch &^= valueBit | leafOwnedBit
+		return n
+	}
+	c := t.copyShape(n, 0)
+	t.dropNode(n)
+	t.link(parent, pidx, c)
+	return c
+}
+
+// setValue stores v in n, which sits at parent.kids[pidx] (or is the root),
+// and returns the value it replaces. parent must be owned.
+func (t *Txn) setValue(parent *node, pidx int, n *node, v any) (any, bool) {
+	old, existed := n.val, n.hasValue()
+	if existed && t.owns(n) && n.epoch&leafOwnedBit != 0 {
+		// The old value was stored by this transaction in this epoch:
+		// nobody can have seen or watched it, so it needs no notification.
+		n.val = v
+		return old, true
+	}
+	n = t.ownValueless(parent, pidx, n)
+	n.val = v
+	n.epoch |= valueBit | leafOwnedBit
+	return old, existed
 }
 
 // Insert stores v under k and returns the previous value, if any. The tree
@@ -238,8 +313,7 @@ func (t *Txn) Insert(k []byte, v any) (any, bool) {
 	for {
 		if len(search) == 0 {
 			// The key ends at n.
-			n = t.own(parent, pidx, n, 0)
-			return t.setLeaf(n, v)
+			return t.setValue(parent, pidx, n, v)
 		}
 
 		idx, ok := n.rank(search[0])
@@ -280,8 +354,8 @@ func (t *Txn) Insert(k []byte, v any) (any, bool) {
 
 		rest := search[common:]
 		if len(rest) == 0 {
-			split.val, split.leaf = v, &leaf{}
-			split.epoch |= leafOwnedBit
+			split.val = v
+			split.epoch |= valueBit | leafOwnedBit
 			split.setKidCount(1)
 			split.setKid(0, trimmed)
 		} else {
@@ -324,7 +398,7 @@ func (t *Txn) ownPath(path []pathEntry) {
 func (t *Txn) unlink(path []pathEntry) {
 	last := len(path) - 1
 	parent, idx := path[last].n, path[last].idx
-	if last > 0 && parent.leaf == nil && parent.kidCount() == 2 {
+	if last > 0 && !parent.hasValue() && parent.kidCount() == 2 {
 		t.ownPath(path[:last])
 		if !t.owns(parent) {
 			t.dropNode(parent)
@@ -357,7 +431,7 @@ func (t *Txn) Delete(k []byte) (any, bool) {
 		search = search[len(c.prefix):]
 		n = c
 	}
-	if n.leaf == nil {
+	if !n.hasValue() {
 		return nil, false
 	}
 	old := n.val
@@ -366,7 +440,7 @@ func (t *Txn) Delete(k []byte) (any, bool) {
 	switch {
 	case len(path) == 0:
 		// The root is never removed or merged.
-		t.clearLeaf(t.own(nil, 0, n, 0))
+		t.ownValueless(nil, 0, n)
 	case n.childless():
 		// The node disappears altogether.
 		t.dropWithLeaf(n)
@@ -379,27 +453,25 @@ func (t *Txn) Delete(k []byte) (any, bool) {
 		t.mergeChild(path[len(path)-1].n, path[len(path)-1].idx, n, n.kid(0))
 	default:
 		t.ownPath(path)
-		t.clearLeaf(t.own(path[len(path)-1].n, path[len(path)-1].idx, n, 0))
+		t.ownValueless(path[len(path)-1].n, path[len(path)-1].idx, n)
 	}
 	return old, true
 }
 
-// dropWithLeaf records n and its leaf as leaving the tree, as far as anybody
+// dropWithLeaf records n and its value as leaving the tree, as far as anybody
 // else can have seen them.
 func (t *Txn) dropWithLeaf(n *node) {
+	t.releaseValue(n)
 	if !t.owns(n) {
 		t.dropNode(n)
-		t.dropLeaf(n.leaf)
-	} else if n.epoch&leafOwnedBit == 0 {
-		t.dropLeaf(n.leaf)
 	}
 }
 
-// mergeChild replaces n -- which sits at parent.kids[pidx], has no leaf (or
+// mergeChild replaces n -- which sits at parent.kids[pidx], has no value (or
 // is giving it up), and is left with the single child c -- with that child,
 // whose path segment absorbs n's. n itself must already be accounted for. The
-// child keeps its leaf object, so the watchers of that key are not disturbed;
-// the child node itself is replaced (and its watchers notified) unless this
+// child keeps its leaf, so the watchers of that key are not disturbed; the
+// child node itself is replaced (and its watchers notified) unless this
 // transaction owns it. parent must be owned.
 func (t *Txn) mergeChild(parent *node, pidx int, n, c *node) {
 	var m *node
@@ -407,8 +479,11 @@ func (t *Txn) mergeChild(parent *node, pidx int, n, c *node) {
 	case c.childless():
 		// A childless result gets the joined segment inline.
 		m = newLeafNode(n.prefix, c.prefix)
-		m.val, m.leaf = c.val, c.leaf
-		m.epoch = t.epoch
+		m.val = c.val
+		if l := t.shareLeaf(c); l != nil {
+			m.leaf.Store(l)
+		}
+		m.epoch = t.epoch | valueBit
 		if t.owns(c) {
 			m.epoch |= c.epoch & leafOwnedBit
 		}

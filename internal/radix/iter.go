@@ -79,7 +79,7 @@ func (it *Iterator) pushSubtree(n *node) {
 	switch {
 	case !n.childless():
 		it.s.push(n, -1)
-	case n.leaf != nil:
+	case n.hasValue():
 		it.s.push(n, leafOnly)
 	}
 }
@@ -145,7 +145,7 @@ func (it *Iterator) Next() (any, bool) {
 				return n.val, true
 			}
 			*i = 0
-			if n.leaf != nil {
+			if n.hasValue() {
 				return n.val, true
 			}
 		}
@@ -225,7 +225,7 @@ func (it *ReverseIterator) Previous() (any, bool) {
 		n, i := s.top()
 		if *i < 0 {
 			s.depth--
-			if n.leaf != nil {
+			if n.hasValue() {
 				return n.val, true
 			}
 			continue

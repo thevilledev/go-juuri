@@ -26,14 +26,14 @@ internal type sketch; the complete declaration is in
 ```go
 type node struct {
 	prefix string    // Compressed path segment, including the label byte.
-	val    any       // Value of the key ending here; valid when leaf != nil.
+	val    any       // Value of the key ending here; valid when epoch says so.
 	bitmap [4]uint64 // One bit per child label; inline segment in compact leaves.
 	nkids  uint16    // Child count; inline segment tail in compact leaves.
 	ckids  uint16    // Child capacity; zero when there is no child array.
 	_      [4]byte
-	leaf   *leaf  // Identity of this version of the value, for watchers.
+	leaf   *leaf  // Identity of this version of the value, created lazily.
 	watch  slot   // Lazily created watch channel.
-	epoch  uint64 // Ownership stamp, including the leaf-ownership bit.
+	epoch  uint64 // Ownership stamp, plus the value and leaf-ownership bits.
 }
 
 type leaf struct{ watch slot }
@@ -88,7 +88,15 @@ A node holds the value, while a separate `leaf` holds the watch slot for that
 version of the key. Copies of a node share the leaf until the value changes.
 This preserves watches through splits and merges, including watches obtained
 later through an older tree. Ordinary reads and iteration do not need to
-dereference the leaf.
+dereference the leaf; a bit in `epoch` records whether the node holds a value.
+
+The leaf is created only when something needs it: a watcher of the key, or a
+copy of the node that keeps the value and so must share its identity. Until
+then the value's identity is the one node that holds it, and most values,
+never watched and never copied, need no leaf at all. A value that leaves a
+committed tree without one gets a shared, already sealed leaf on notification,
+so that a watcher arriving later through an older tree is still notified. The
+leaf pointer is atomic because readers may create it on a published node.
 
 The tree stores path segments rather than retaining the caller's key slices.
 Iterators return values only. Values are not deep-copied, so a mutable value
@@ -112,8 +120,8 @@ Every node carries the epoch of the transaction that created it; epochs come
 from one process-wide atomic counter (trees of a database and of its snapshots
 share nodes and have independent writers, so an epoch must never be issued
 twice). A write transaction may mutate a node in place only when its ownership
-epoch matches the transaction's, after masking out the
-leaf-ownership bit; any other node is copied first.
+epoch matches the transaction's, after masking out the value and
+leaf-ownership bits; any other node is copied first.
 
 `Txn.Freeze()` makes everything written so far immutable in O(1): the
 transaction forgets its epoch and draws a new one on its next write.
@@ -136,7 +144,7 @@ A watch slot is an atomic pointer. It moves from `nil` to a channel and then to
 a sealed state, or directly from `nil` to sealed if nobody watched it.
 
 - A **reader** materialises a channel with `CompareAndSwap(nil, ch)`.
-- A **writer** with a non-nil `Notifier` records the nodes and leaves it
+- A **writer** with a non-nil `Notifier` records the nodes and values it
   replaces. After committing and publishing the new tree, the caller runs
   `Notify()` to seal their slots and close any existing channels. The sealed
   state holds a permanently closed channel.
@@ -160,8 +168,9 @@ The watch rules preserve go-immutable-radix's notification granularity:
 - The root is never merged, and every new tree starts with its own root.
 - `DeletePrefix` records the removed subtree's root and walks that subtree
   during `Notify()`, so an aborted transaction avoids the walk.
-- A bit in `epoch` marks a leaf created in the current ownership epoch.
-  Repeated updates within that epoch reuse the leaf and keep tracking bounded.
+- A bit in `epoch` marks a value stored in the current ownership epoch.
+  Nobody can have watched it, so repeated updates within that epoch need no
+  tracking, which keeps tracking bounded.
 
 Passing `nil` to `Tree.Txn` disables notification tracking. To abort tracked
 writes, discard the transaction and call `Notifier.Reset()` before reusing the
