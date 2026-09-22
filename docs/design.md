@@ -90,8 +90,10 @@ This preserves watches through splits and merges, including watches obtained
 later through an older tree. Ordinary reads and iteration do not need to
 dereference the leaf; a bit in `epoch` records whether the node holds a value.
 
-The leaf is created only when something needs it: a watcher of the key, or a
-copy of the node that keeps the value and so must share its identity. Until
+The leaf is created only when something needs it: the first watcher to ask
+for the key's channel, which gets the leaf and the cell holding its channel in
+one allocation, or a copy of the node that keeps the value and so must share
+its identity. A key watch that is never consulted creates nothing. Until
 then the value's identity is the one node that holds it, and most values,
 never watched and never copied, need no leaf at all. A value that leaves a
 committed tree without one gets a shared, already sealed leaf on notification,

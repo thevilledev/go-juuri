@@ -44,8 +44,9 @@ import (
 // they ask for a watch.
 //
 // Most values are never watched, and most are never copied to another node
-// either, so the leaf is created lazily (see leafOf): only when a watcher asks
-// for it, or when a copy of the node must share it with the original. Until
+// either, so the leaf is created lazily: only when a watcher asks for its
+// channel (see valueChan), or when a copy of the node must share it with the
+// original (see leafOf). Until
 // then the value's identity is simply the one node that holds it. A node whose
 // value leaves the tree without ever having had a leaf gets sealedLeaf on
 // notification, so that a late watcher still finds it stale.
@@ -89,6 +90,29 @@ func (n *node) leafOf() *leaf {
 		return l
 	}
 	return n.leaf.Load()
+}
+
+// watchedLeaf is a leaf created for its first watcher, together with the cell
+// that holds the watcher's channel: one allocation instead of two.
+type watchedLeaf struct {
+	leaf
+	cell watch.Cell
+}
+
+// valueChan returns the watch channel of n's value, which n must hold. The
+// leaf is created here if nobody has needed it yet, with the channel already
+// in place; like leafOf, it may race with other readers and with a writer's
+// copy or seal, and the first leaf installed wins.
+func (n *node) valueChan() <-chan struct{} {
+	if l := n.leaf.Load(); l != nil {
+		return l.watch.Chan()
+	}
+	wl := &watchedLeaf{}
+	ch := wl.watch.Live(&wl.cell)
+	if n.leaf.CompareAndSwap(nil, &wl.leaf) {
+		return ch
+	}
+	return n.leaf.Load().watch.Chan()
 }
 
 // sealValue seals the leaf of the value of n, a node that has left the tree:

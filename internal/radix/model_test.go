@@ -139,9 +139,14 @@ func checkTree(tb testing.TB, tr Tree, m model, probes [][]byte) {
 		if !ok || got.(int) != want {
 			tb.Fatalf("Get(%q) = %v,%v want %d", k, got, ok, want)
 		}
-		_, got, ok = tr.GetWatch([]byte(k))
+		w, got, ok := tr.GetWatch([]byte(k))
 		if !ok || got.(int) != want {
 			tb.Fatalf("GetWatch(%q) = %v,%v want %d", k, got, ok, want)
+		}
+		if want%2 != 0 {
+			// Watch half the keys, so that later writes meet values
+			// both with and without a leaf.
+			w.Chan()
 		}
 	}
 
