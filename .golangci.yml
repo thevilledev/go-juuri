@@ -1,0 +1,198 @@
+# Copyright (c) 2026 Ville Vesilehto
+# SPDX-License-Identifier: MPL-2.0
+#
+# Linters are enabled explicitly rather than by group, so that adding one is a
+# deliberate act. The selection favours correctness and clarity checks that
+# leave the code readable: style linters that would mangle the layout of this
+# codebase (wsl, nlreturn, varnamelen, funlen, gocognit, mnd, ...) stay off.
+#
+# Run it over both build variants and both modules with `make lint`.
+
+version: "2"
+
+run:
+  tests: true
+
+linters:
+  default: none
+  enable:
+    # Correctness.
+    - asasalint          # []any passed to a variadic any
+    - bidichk            # dangerous bidirectional unicode
+    - bodyclose
+    - copyloopvar
+    - durationcheck
+    - errcheck
+    - errorlint
+    - exptostd
+    - gocheckcompilerdirectives # a mistyped //go: directive is silently inert
+    - gosec
+    - govet
+    - ineffassign
+    - makezero
+    - nilerr
+    - nilnesserr
+    - reassign
+    - recvcheck          # mixed pointer/value receivers
+    - rowserrcheck
+    - sqlclosecheck
+    - staticcheck
+    - unused
+    - wastedassign
+
+    # Clarity.
+    - asciicheck
+    - dupword
+    - godot
+    - goheader
+    - iface
+    - intrange
+    - misspell
+    - modernize
+    - nakedret
+    - nolintlint
+    - predeclared
+    - revive
+    - unconvert
+    - unparam
+    - usestdlibvars
+    - whitespace
+
+    # Performance.
+    - perfsprint
+    - prealloc
+
+    # Hygiene.
+    - depguard
+    - gochecknoinits
+    - gocritic
+    - thelper
+    - tparallel
+    - usetesting
+
+  settings:
+    depguard:
+      rules:
+        # The library is dependency-free; only the nested radixdiff module,
+        # which exists to compare against go-immutable-radix, may import it.
+        library:
+          files:
+            - '!**/radixdiff/**'
+          allow:
+            - $gostd
+            - github.com/thevilledev/go-juuri
+
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - opinionated
+        - performance
+        - style
+      disabled-checks:
+        # Naming a returned pointer's fields is exactly what the node
+        # accessors do; and unnamed results read better here.
+        - unnamedResult
+        # Long, deliberately-structured comments explain layout decisions.
+        - commentFormatting
+
+    godot:
+      scope: declarations
+
+    goheader:
+      values:
+        regexp:
+          year: '20\d{2}'
+      template: |-
+        Copyright (c) {{ year }} Ville Vesilehto
+        SPDX-License-Identifier: MPL-2.0
+
+    gosec:
+      excludes:
+        # The whole point of the default build: package unsafe places the
+        # child array and the path segment inside the node's allocation.
+        # The two files that use it are the ones to review by hand.
+        - G103
+
+    govet:
+      enable-all: true
+      disable:
+        # The node declarations are laid out for cache lines, not for size.
+        - fieldalignment
+
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
+
+    perfsprint:
+      strconcat: false # `a + b` over strings.Builder for two operands
+
+    revive:
+      rules:
+        - name: blank-imports
+        - name: bool-literal-in-expr
+        - name: constant-logical-expr
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: defer
+        - name: dot-imports
+        - name: duplicated-imports
+        - name: early-return
+        - name: empty-block
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: exported
+        - name: identical-branches
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: modifies-value-receiver
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: superfluous-else
+        - name: time-naming
+        - name: unexported-return
+        - name: unnecessary-stmt
+        - name: unreachable-code
+        - name: unused-parameter
+        - name: use-any
+        - name: useless-break
+        - name: var-declaration
+        - name: var-naming
+        - name: waitgroup-by-value
+
+  exclusions:
+    presets:
+      - comments
+      - std-error-handling
+    rules:
+      # The child array of a size-classed node is never named: the accessors
+      # reach it by pointer arithmetic from the end of the header. Only that
+      # message is excluded, so a genuinely unused declaration still reports.
+      - linters:
+          - unused
+        text: 'field arr is unused'
+
+      - path: _test\.go
+        linters:
+          # The tests assert on values they stored themselves; a wrong type
+          # is a test bug, and the panic says so loudly enough.
+          - errcheck
+          - gosec
+          - prealloc
+
+issues:
+  # Report everything: a truncated list hides the tail of a new finding.
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+formatters:
+  enable:
+    - gofmt

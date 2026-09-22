@@ -1,0 +1,9 @@
+# Binaries and test artefacts
+*.test
+*.prof
+*.out
+
+# Editors
+.idea
+.vscode
+.DS_Store
