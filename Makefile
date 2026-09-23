@@ -6,7 +6,8 @@ SHELL := /bin/sh
 GOLANGCI ?= golangci-lint
 GOLANGCI_VERSION ?= v2.13.2
 
-.PHONY: all tools test race test-safe test-386 lint fmt vet headers fuzz diff check bench
+.PHONY: all tools test race test-safe test-386 lint fmt vet headers fuzz diff check bench \
+	formal formal-lean formal-conformance formal-tla
 
 all: check
 
@@ -73,3 +74,24 @@ check: lint headers test race test-safe diff
 # else may build or test while it runs.
 bench:
 	cd radixdiff && GOGC=400 go test -run '^$$' -bench . -benchtime 1s -count 6 -cpu 1
+
+# Formal verification (formal/README.md): the Lean proofs, the conformance
+# test of the Lean model against this code, and the TLA+ models. Needs Lean 4
+# (elan picks the pinned toolchain), and Java with tla2tools.jar for TLC.
+JAVA ?= java
+TLA2TOOLS ?= $(HOME)/.local/share/tlaplus/tla2tools.jar
+TLC = $(JAVA) -XX:+UseParallelGC -cp $(TLA2TOOLS) tlc2.TLC -workers auto -cleanup
+
+formal: formal-lean formal-conformance formal-tla
+
+formal-lean:
+	cd formal/lean && lake build
+
+formal-conformance:
+	cd formal/lean && lake build conformance
+	cd formal/conformance && go test -count=1 .
+
+formal-tla:
+	cd formal/tla && $(TLC) -config LazyWatch.cfg LazyWatch.tla
+	cd formal/tla && $(TLC) -config MCJuuriTxn.cfg MCJuuriTxn.tla
+	cd formal/tla && $(TLC) -config MCJuuriTxnFork.cfg MCJuuriTxn.tla

@@ -59,6 +59,19 @@ This runs `FuzzTreeOps` against a reference model for 60 seconds, then
 writes, iteration, and watch behaviour. The model fuzzer also retains iterators
 over uncommitted state across later writes.
 
+## Formal verification
+
+```sh
+make formal
+```
+
+This checks the Lean proofs of the tree's operations and iterators, runs the
+Lean model against the Go code on random scripts, and model-checks the TLA+
+models of ownership, notification and the lock-free watch protocol. It needs
+Lean 4 through elan, Java, and `tla2tools.jar`. See
+[`formal/README.md`](../formal/README.md) for what is covered and the
+individual targets.
+
 ## Benchmarks
 
 ```sh
@@ -87,6 +100,7 @@ tested at the root ([`api_test.go`](../api_test.go),
 | `internal/radix/node_{unsafe,safe}.go`, `segment_{unsafe,safe}.go` | Node layout and path storage for each build |
 | [`internal/watch/`](../internal/watch/) | Lazily materialised watch channels |
 | [`radixdiff/`](../radixdiff/) | Differential tests and comparison benchmarks |
+| [`formal/`](../formal/) | Lean proofs, TLA+ models, and a conformance test of the Lean model against the code |
 | [`docs/`](./) | Supporting documentation |
 
 The nested module keeps go-immutable-radix out of the library's dependencies.
