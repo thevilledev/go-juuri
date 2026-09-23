@@ -3,8 +3,6 @@
 
 package radix
 
-import "github.com/thevilledev/go-juuri/internal/watch"
-
 // frame is one level of an in-progress traversal: a node and the position of
 // the next child to visit. The meaning of i differs per direction, see below.
 // A node has at most 256 children, so the position fits 16 bits -- which keeps
@@ -79,20 +77,20 @@ func (it *Iterator) pushSubtree(n *node) {
 	switch {
 	case !n.childless():
 		it.s.push(n, -1)
-	case n.leaf != nil:
+	case n.hasValue():
 		it.s.push(n, leafOnly)
 	}
 }
 
 // SeekPrefixWatch positions the iterator on the keys of t that start with
 // prefix and returns the finest-grained watch covering that prefix.
-func (it *Iterator) SeekPrefixWatch(t Tree, prefix []byte) *watch.Slot {
+func (it *Iterator) SeekPrefixWatch(t Tree, prefix []byte) Watch {
 	it.s.reset()
 	n, w := t.seekPrefix(prefix)
 	if n != nil {
 		it.pushSubtree(n)
 	}
-	return w
+	return Watch{slot: w}
 }
 
 // SeekLowerBound positions the iterator on the smallest key >= key; iteration
@@ -145,7 +143,7 @@ func (it *Iterator) Next() (any, bool) {
 				return n.val, true
 			}
 			*i = 0
-			if n.leaf != nil {
+			if n.hasValue() {
 				return n.val, true
 			}
 		}
@@ -175,13 +173,13 @@ type ReverseIterator struct {
 
 // SeekPrefixWatch positions the iterator on the keys of t that start with
 // prefix, to be visited in descending order.
-func (it *ReverseIterator) SeekPrefixWatch(t Tree, prefix []byte) *watch.Slot {
+func (it *ReverseIterator) SeekPrefixWatch(t Tree, prefix []byte) Watch {
 	it.s.reset()
 	n, w := t.seekPrefix(prefix)
 	if n != nil {
 		it.s.push(n, n.kidCount()-1)
 	}
-	return w
+	return Watch{slot: w}
 }
 
 // SeekReverseLowerBound positions the iterator on the greatest key <= key;
@@ -225,7 +223,7 @@ func (it *ReverseIterator) Previous() (any, bool) {
 		n, i := s.top()
 		if *i < 0 {
 			s.depth--
-			if n.leaf != nil {
+			if n.hasValue() {
 				return n.val, true
 			}
 			continue

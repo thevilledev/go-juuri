@@ -88,13 +88,16 @@ func checkShape(tb testing.TB, tr Tree) {
 			if n.prefix == "" {
 				tb.Fatalf("non-root node with empty prefix")
 			}
-			if n.leaf == nil && n.kidCount() < 2 {
-				tb.Fatalf("node %q: no leaf and %d kids (should have been merged/removed)", n.prefix, n.kidCount())
+			if !n.hasValue() && n.kidCount() < 2 {
+				tb.Fatalf("node %q: no value and %d kids (should have been merged/removed)", n.prefix, n.kidCount())
 			}
+		}
+		if !n.hasValue() && (n.leaf.Load() != nil || n.val != nil) {
+			tb.Fatalf("node %q: a leaf or a value but no valueBit", n.prefix)
 		}
 		if n.compact() {
 			// A compact leaf has no bitmap: its segment lives there.
-			if isRoot || n.leaf == nil || n.kidCount() != 0 || !n.childless() || n.kidList() != nil {
+			if isRoot || !n.hasValue() || n.kidCount() != 0 || !n.childless() || n.kidList() != nil {
 				tb.Fatalf("node %q: compact leaf that is the root, valueless, or has children", n.prefix)
 			}
 		} else {
@@ -136,9 +139,14 @@ func checkTree(tb testing.TB, tr Tree, m model, probes [][]byte) {
 		if !ok || got.(int) != want {
 			tb.Fatalf("Get(%q) = %v,%v want %d", k, got, ok, want)
 		}
-		_, got, ok = tr.GetWatch([]byte(k))
+		w, got, ok := tr.GetWatch([]byte(k))
 		if !ok || got.(int) != want {
 			tb.Fatalf("GetWatch(%q) = %v,%v want %d", k, got, ok, want)
+		}
+		if want%2 != 0 {
+			// Watch half the keys, so that later writes meet values
+			// both with and without a leaf.
+			w.Chan()
 		}
 	}
 
@@ -202,14 +210,14 @@ func checkTree(tb testing.TB, tr Tree, m model, probes [][]byte) {
 	}
 }
 
-// reach collects every node and leaf reachable from a root.
+// reach collects every node and every existing leaf reachable from a root.
 func reach(root *node) (map[*node]bool, map[*leaf]bool) {
 	nodes, leaves := map[*node]bool{}, map[*leaf]bool{}
 	var walk func(n *node)
 	walk = func(n *node) {
 		nodes[n] = true
-		if n.leaf != nil {
-			leaves[n.leaf] = true
+		if l := n.leaf.Load(); l != nil {
+			leaves[l] = true
 		}
 		for _, k := range n.kidList() {
 			walk(k)
@@ -228,6 +236,12 @@ func checkSeals(tb testing.TB, before, after Tree) {
 	for n := range oldNodes {
 		if !newNodes[n] && !n.watch.Sealed() {
 			tb.Fatalf("node %q left the tree but is not sealed", n.prefix)
+		}
+		// A value that never had a leaf lived in this node alone (a copy
+		// would have created one to share), so it left the tree with it
+		// and must have been given a sealed leaf.
+		if !newNodes[n] && n.hasValue() && n.leaf.Load() == nil {
+			tb.Fatalf("node %q left the tree with a value that was not sealed", n.prefix)
 		}
 	}
 	for l := range oldLeaves {
@@ -499,4 +513,31 @@ func TestDeepKeys(t *testing.T) {
 		delete(m, string(key[:i+1]))
 	}
 	checkTree(t, txn.Commit(), m, probes)
+}
+
+// TestRank checks rank against a plain count for every label, over bitmaps
+// that empty or fill whole words as well as random ones.
+func TestRank(t *testing.T) {
+	r := rand.New(rand.NewSource(1))
+	words := []uint64{0, ^uint64(0), 1, 1 << 63}
+	n := newNode(256)
+	for range 2000 {
+		for i := range n.bitmap {
+			if r.Intn(2) == 0 {
+				n.bitmap[i] = words[r.Intn(len(words))]
+			} else {
+				n.bitmap[i] = r.Uint64()
+			}
+		}
+		for label := range 256 {
+			want := 0
+			for l := range label {
+				want += int(n.bitmap[l>>6] >> (l & 63) & 1)
+			}
+			idx, ok := n.rank(byte(label))
+			if idx != want || ok != (n.bitmap[label>>6]>>(label&63)&1 != 0) {
+				t.Fatalf("bitmap %x: rank(%d) = %d,%v want %d", n.bitmap, label, idx, ok, want)
+			}
+		}
+	}
 }

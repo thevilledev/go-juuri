@@ -14,7 +14,7 @@ type Iterator struct {
 // SeekPrefixWatch positions the iterator on the keys of t that start with
 // prefix and returns the finest-grained watch covering that prefix.
 func (it *Iterator) SeekPrefixWatch(t Tree, prefix []byte) Watch {
-	return Watch{s: it.iter.SeekPrefixWatch(t.tree, prefix)}
+	return Watch{w: it.iter.SeekPrefixWatch(t.tree, prefix)}
 }
 
 // SeekLowerBound positions the iterator on the smallest key >= key; iteration
@@ -38,7 +38,7 @@ type ReverseIterator struct {
 // prefix, to be visited in descending order, and returns the finest-grained
 // watch covering that prefix.
 func (it *ReverseIterator) SeekPrefixWatch(t Tree, prefix []byte) Watch {
-	return Watch{s: it.iter.SeekPrefixWatch(t.tree, prefix)}
+	return Watch{w: it.iter.SeekPrefixWatch(t.tree, prefix)}
 }
 
 // SeekReverseLowerBound positions the iterator on the greatest key <= key;

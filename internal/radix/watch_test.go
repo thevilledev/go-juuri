@@ -9,8 +9,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/thevilledev/go-juuri/internal/watch"
 )
 
 func fired(ch <-chan struct{}) bool {
@@ -125,6 +123,40 @@ func TestWatchKey(t *testing.T) {
 	// Delete fires it.
 	commit(tr5, func(txn *Txn) { txn.Delete([]byte("foobar")) })
 	if !fired(lw.Chan()) {
+		t.Fatal("delete did not fire the key watch")
+	}
+}
+
+// TestWatchConsultedLate: a key watch creates nothing until its channel is
+// asked for, and a channel asked for after the key has changed -- through a
+// watch taken before the change, or through the old tree -- is already closed.
+func TestWatchConsultedLate(t *testing.T) {
+	tr := build("foo", "bar")
+	w, _, ok := tr.GetWatch([]byte("foo"))
+	if !ok {
+		t.Fatal("foo missing")
+	}
+	if w.value.leaf.Load() != nil {
+		t.Fatal("GetWatch created the leaf before the channel was asked for")
+	}
+	tr2 := commit(tr, func(txn *Txn) { txn.Insert([]byte("foo"), 2) })
+	if !fired(w.Chan()) {
+		t.Fatal("watch taken before the update and consulted after it did not fire")
+	}
+	late, _, _ := tr.GetWatch([]byte("foo"))
+	if !fired(late.Chan()) {
+		t.Fatal("watch taken through the old tree after the update did not fire")
+	}
+	live, _, _ := tr2.GetWatch([]byte("foo"))
+	if fired(live.Chan()) {
+		t.Fatal("watch of the new value is closed")
+	}
+	other, _, _ := tr2.GetWatch([]byte("bar"))
+	if fired(other.Chan()) {
+		t.Fatal("watch of an unchanged key is closed")
+	}
+	commit(tr2, func(txn *Txn) { txn.Delete([]byte("foo")) })
+	if !fired(live.Chan()) {
 		t.Fatal("delete did not fire the key watch")
 	}
 }
@@ -348,7 +380,7 @@ func TestNoLostWakeups(t *testing.T) {
 			defer wg.Done()
 			for i := 0; time.Now().Before(deadline); i++ {
 				tr := *published.Load()
-				var w *watch.Slot
+				var w Watch
 				switch i % 3 {
 				case 0:
 					w, _, _ = tr.GetWatch([]byte(fmt.Sprintf("key-%03d", (i+r)%keys)))

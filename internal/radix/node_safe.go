@@ -5,10 +5,15 @@
 
 package radix
 
-import "github.com/thevilledev/go-juuri/internal/watch"
+import (
+	"sync/atomic"
 
-// node is a radix tree node. Everything except the watch slot is immutable
-// once the node is visible to anyone but the transaction that owns it.
+	"github.com/thevilledev/go-juuri/internal/watch"
+)
+
+// node is a radix tree node. Everything except the watch slot and the lazily
+// created leaf is immutable once the node is visible to anyone but the
+// transaction that owns it.
 //
 // This is the declaration of the pure-safe build: the children are an ordinary
 // slice, which points into the node's own allocation (see newNode). The default
@@ -22,11 +27,12 @@ type node struct {
 	kids   []*node
 	bitmap [4]uint64
 	// val is the value of the key that ends exactly at this node; it is
-	// meaningful iff leaf is non-nil.
-	val   any
-	leaf  *leaf
+	// meaningful iff the epoch carries valueBit.
+	val any
+	// leaf is the identity of the value, created lazily (see leafOf).
+	leaf  atomic.Pointer[leaf]
 	watch watch.Slot
-	// epoch is the ownership stamp (plus leafOwnedBit).
+	// epoch is the ownership stamp (plus valueBit and leafOwnedBit).
 	epoch uint64
 }
 

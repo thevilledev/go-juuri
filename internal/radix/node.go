@@ -42,14 +42,92 @@ import (
 // The value itself lives in the node (node.val), next to everything else a
 // lookup or an iteration step needs: reads never touch the leaf object unless
 // they ask for a watch.
+//
+// Most values are never watched, and most are never copied to another node
+// either, so the leaf is created lazily: only when a watcher asks for its
+// channel (see valueChan), or when a copy of the node must share it with the
+// original (see leafOf). Until
+// then the value's identity is simply the one node that holds it. A node whose
+// value leaves the tree without ever having had a leaf gets sealedLeaf on
+// notification, so that a late watcher still finds it stale.
 type leaf struct {
 	watch watch.Slot
 }
 
-// leafOwnedBit is stolen from node.epoch. It records that the node's current
-// leaf was created in the node's own epoch, so it has never been visible to
-// anyone else and need not be tracked for notification when replaced again.
-const leafOwnedBit = uint64(1) << 63
+// sealedLeaf stands for every value that left a committed tree before anybody
+// needed its leaf.
+var sealedLeaf = func() *leaf {
+	l := &leaf{}
+	l.watch.Seal()
+	return l
+}()
+
+// Two bits are stolen from node.epoch. valueBit records that a key ends at the
+// node: node.val is meaningful. leafOwnedBit records that the value was stored
+// in the node's own epoch, so it has never been visible to anyone else -- its
+// leaf does not exist -- and need not be tracked for notification when replaced
+// again.
+const (
+	leafOwnedBit = uint64(1) << 63
+	valueBit     = uint64(1) << 62
+	epochMask    = valueBit - 1
+)
+
+// hasValue reports whether a key ends at n.
+func (n *node) hasValue() bool {
+	return n.epoch&valueBit != 0
+}
+
+// leafOf returns the leaf of n's value, creating it if nobody has needed it
+// yet. n must hold a value. It may be called on a published node, concurrently
+// with readers doing the same: the first leaf installed wins.
+func (n *node) leafOf() *leaf {
+	if l := n.leaf.Load(); l != nil {
+		return l
+	}
+	l := &leaf{}
+	if n.leaf.CompareAndSwap(nil, l) {
+		return l
+	}
+	return n.leaf.Load()
+}
+
+// watchedLeaf is a leaf created for its first watcher, together with the cell
+// that holds the watcher's channel: one allocation instead of two.
+type watchedLeaf struct {
+	leaf
+	cell watch.Cell
+}
+
+// valueChan returns the watch channel of n's value, which n must hold. The
+// leaf is created here if nobody has needed it yet, with the channel already
+// in place; like leafOf, it may race with other readers and with a writer's
+// copy or seal, and the first leaf installed wins.
+func (n *node) valueChan() <-chan struct{} {
+	if l := n.leaf.Load(); l != nil {
+		return l.watch.Chan()
+	}
+	wl := &watchedLeaf{}
+	ch := wl.watch.Live(&wl.cell)
+	if n.leaf.CompareAndSwap(nil, &wl.leaf) {
+		return ch
+	}
+	return n.leaf.Load().watch.Chan()
+}
+
+// sealValue seals the leaf of the value of n, a node that has left the tree:
+// the leaf's watchers are notified, and a leaf that was never created becomes
+// sealedLeaf, so that a watcher arriving through an old tree is notified too.
+func sealValue(n *node) {
+	l := n.leaf.Load()
+	if l == nil {
+		if n.leaf.CompareAndSwap(nil, sealedLeaf) {
+			return
+		}
+		l = n.leaf.Load() // a watcher got there first
+	}
+	l.watch.Seal()
+}
 
 // oneByte holds every one-byte string, so that the (very common) one-byte
 // path segments need no allocation.
@@ -75,21 +153,24 @@ func cloneSegment(s string) string {
 //
 // The shape of the function is dictated by the inliner's budget: it is called
 // once per level of every lookup and must stay inlinable, with the compact
-// check included. The lower words are summed in a loop rather than a switch
-// with fallthroughs, which costs the same at run time and a good deal less in
-// the inliner's accounting.
+// check included. Within that budget it avoids branching on the label, whose
+// word index is as unpredictable as the key: the label's own word is shifted
+// so that its bit lands on top, which answers both results at once, and the
+// first word is added without a branch -- shifted out of existence when the
+// label is in it, as Go defines a shift by 64 to give zero. Only labels of 128
+// and above loop over the words between.
 func (n *node) rank(label byte) (int, bool) {
 	if n.compact() {
 		return 0, false
 	}
 	w := label >> 6
-	bit := uint64(1) << (label & 63)
-	word := n.bitmap[w]
-	idx := bits.OnesCount64(word & (bit - 1))
-	for _, x := range n.bitmap[:w] {
-		idx += bits.OnesCount64(x)
+	x := n.bitmap[w] << (^label & 63)
+	idx := bits.OnesCount64(x<<1) + bits.OnesCount64(n.bitmap[0]<<((w-1)&64))
+	for w > 1 {
+		w--
+		idx += bits.OnesCount64(n.bitmap[w])
 	}
-	return idx, word&bit != 0
+	return idx, x>>63 != 0
 }
 
 // addKid inserts c at position idx. The node must be owned by the caller and
@@ -149,7 +230,7 @@ func commonPrefixLen(a []byte, b string) int {
 // node's own key sorts before the keys of its children.
 func (n *node) minNode() *node {
 	for {
-		if n.leaf != nil {
+		if n.hasValue() {
 			return n
 		}
 		if n.kidCount() == 0 {
@@ -164,7 +245,7 @@ func (n *node) maxNode() *node {
 	for count := n.kidCount(); count > 0; count = n.kidCount() {
 		n = n.kid(count - 1)
 	}
-	if n.leaf == nil {
+	if !n.hasValue() {
 		return nil // only an empty root
 	}
 	return n

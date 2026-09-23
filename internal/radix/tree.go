@@ -35,36 +35,55 @@ func (t Tree) Get(k []byte) (any, bool) {
 		}
 		search = search[len(n.prefix):]
 	}
-	if n.leaf == nil {
+	if !n.hasValue() {
 		return nil, false
 	}
 	return n.val, true
+}
+
+// Watch is what the tree hands out to be watched: the watch slot of a node, or
+// the value of a node, whose leaf holds the slot and is only created when the
+// channel is asked for. The zero Watch has a nil channel.
+type Watch struct {
+	slot  *watch.Slot
+	value *node
+}
+
+// Chan returns the watch channel, creating it on first use.
+func (w Watch) Chan() <-chan struct{} {
+	switch {
+	case w.value != nil:
+		return w.value.valueChan()
+	case w.slot != nil:
+		return w.slot.Chan()
+	}
+	return nil
 }
 
 // GetWatch is Get plus a watch. On a hit the watch covers exactly that key.
 // On a miss it covers the deepest node on the search path -- including a child
 // whose prefix diverges from the key -- which is the node an insert of k would
 // have to replace, so the watch fires when k is created.
-func (t Tree) GetWatch(k []byte) (*watch.Slot, any, bool) {
+func (t Tree) GetWatch(k []byte) (Watch, any, bool) {
 	n := t.root
 	w := &n.watch
 	search := k
 	for len(search) > 0 {
 		idx, ok := n.rank(search[0])
 		if !ok {
-			return w, nil, false
+			return Watch{slot: w}, nil, false
 		}
 		n = n.kid(idx)
 		w = &n.watch
 		if !n.hasPrefix(search) {
-			return w, nil, false
+			return Watch{slot: w}, nil, false
 		}
 		search = search[len(n.prefix):]
 	}
-	if n.leaf == nil {
-		return w, nil, false
+	if !n.hasValue() {
+		return Watch{slot: w}, nil, false
 	}
-	return &n.leaf.watch, n.val, true
+	return Watch{value: n}, n.val, true
 }
 
 // LongestPrefix returns the value of the longest stored key that is a prefix
@@ -74,7 +93,7 @@ func (t Tree) LongestPrefix(k []byte) (any, bool) {
 	n := t.root
 	search := k
 	for {
-		if n.leaf != nil {
+		if n.hasValue() {
 			last = n
 		}
 		if len(search) == 0 {
@@ -125,29 +144,29 @@ func (t Tree) seekPrefix(prefix []byte) (*node, *watch.Slot) {
 
 // FirstPrefix returns the value of the smallest key starting with prefix,
 // without allocating an iterator.
-func (t Tree) FirstPrefix(prefix []byte) (*watch.Slot, any, bool) {
+func (t Tree) FirstPrefix(prefix []byte) (Watch, any, bool) {
 	n, w := t.seekPrefix(prefix)
 	if n == nil {
-		return w, nil, false
+		return Watch{slot: w}, nil, false
 	}
 	m := n.minNode()
 	if m == nil {
-		return w, nil, false
+		return Watch{slot: w}, nil, false
 	}
-	return w, m.val, true
+	return Watch{slot: w}, m.val, true
 }
 
 // LastPrefix returns the value of the greatest key starting with prefix.
-func (t Tree) LastPrefix(prefix []byte) (*watch.Slot, any, bool) {
+func (t Tree) LastPrefix(prefix []byte) (Watch, any, bool) {
 	n, w := t.seekPrefix(prefix)
 	if n == nil {
-		return w, nil, false
+		return Watch{slot: w}, nil, false
 	}
 	m := n.maxNode()
 	if m == nil {
-		return w, nil, false
+		return Watch{slot: w}, nil, false
 	}
-	return w, m.val, true
+	return Watch{slot: w}, m.val, true
 }
 
 // Len counts the keys in the tree. It walks the whole tree; it exists for
@@ -158,7 +177,7 @@ func (t Tree) Len() int {
 
 func countLeaves(n *node) int {
 	c := 0
-	if n.leaf != nil {
+	if n.hasValue() {
 		c = 1
 	}
 	for _, k := range n.kidList() {

@@ -3,10 +3,7 @@
 
 package juuri
 
-import (
-	"github.com/thevilledev/go-juuri/internal/radix"
-	"github.com/thevilledev/go-juuri/internal/watch"
-)
+import "github.com/thevilledev/go-juuri/internal/radix"
 
 // Tree is an immutable radix tree. It is a one-pointer value: copy it freely.
 // A Tree obtained from a committed transaction never changes, so any number of
@@ -25,17 +22,14 @@ func New() Tree {
 // materialised on the first call to Chan, so a Watch that is never consulted
 // costs nothing. The zero Watch has a nil channel, which blocks forever.
 type Watch struct {
-	s *watch.Slot
+	w radix.Watch
 }
 
 // Chan returns the channel that is closed when a committed transaction
 // replaces the watched object: for a key, when it is updated or deleted; for a
 // node, when anything in its subtree changes.
 func (w Watch) Chan() <-chan struct{} {
-	if w.s == nil {
-		return nil
-	}
-	return w.s.Chan()
+	return w.w.Chan()
 }
 
 // Get returns the value stored under k.
@@ -48,8 +42,8 @@ func (t Tree) Get(k []byte) (any, bool) {
 // whose prefix diverges from the key -- which is the node an insert of k would
 // have to replace, so the watch fires when k is created.
 func (t Tree) GetWatch(k []byte) (Watch, any, bool) {
-	s, v, ok := t.tree.GetWatch(k)
-	return Watch{s: s}, v, ok
+	w, v, ok := t.tree.GetWatch(k)
+	return Watch{w: w}, v, ok
 }
 
 // LongestPrefix returns the value of the longest stored key that is a prefix
@@ -61,15 +55,15 @@ func (t Tree) LongestPrefix(k []byte) (any, bool) {
 // FirstPrefix returns the value of the smallest key starting with prefix,
 // without allocating an iterator, plus a watch covering that prefix.
 func (t Tree) FirstPrefix(prefix []byte) (Watch, any, bool) {
-	s, v, ok := t.tree.FirstPrefix(prefix)
-	return Watch{s: s}, v, ok
+	w, v, ok := t.tree.FirstPrefix(prefix)
+	return Watch{w: w}, v, ok
 }
 
 // LastPrefix returns the value of the greatest key starting with prefix, plus
 // a watch covering that prefix.
 func (t Tree) LastPrefix(prefix []byte) (Watch, any, bool) {
-	s, v, ok := t.tree.LastPrefix(prefix)
-	return Watch{s: s}, v, ok
+	w, v, ok := t.tree.LastPrefix(prefix)
+	return Watch{w: w}, v, ok
 }
 
 // Len counts the keys in the tree. It walks the whole tree; it exists for

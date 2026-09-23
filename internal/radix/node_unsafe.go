@@ -6,13 +6,15 @@
 package radix
 
 import (
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/thevilledev/go-juuri/internal/watch"
 )
 
-// node is a radix tree node. Everything except the watch slot is immutable
-// once the node is visible to anyone but the transaction that owns it.
+// node is a radix tree node. Everything except the watch slot and the lazily
+// created leaf is immutable once the node is visible to anyone but the
+// transaction that owns it.
 //
 // A node is allocated together with room for its children (see newNode): the
 // child array directly follows the header. This declaration has no slice for
@@ -38,7 +40,7 @@ type node struct {
 	// the label byte its parent indexes it by. Empty only for the root.
 	prefix string
 	// val is the value of the key that ends exactly at this node; it is
-	// meaningful iff leaf is non-nil.
+	// meaningful iff the epoch carries valueBit.
 	val any
 	// bitmap has one bit per present label; the child for label is the
 	// rank(label)-th element of the child array. A node is childless iff the
@@ -53,9 +55,12 @@ type node struct {
 	nkids, ckids uint16
 	_            [4]byte
 
-	leaf  *leaf
+	// leaf is the identity of the value, created lazily (see leafOf): a
+	// node may hold a value and no leaf yet, but a leaf only with a value.
+	// Watchers and copies may create it on a published node, hence atomic.
+	leaf  atomic.Pointer[leaf]
 	watch watch.Slot
-	// epoch is the ownership stamp (plus leafOwnedBit).
+	// epoch is the ownership stamp (plus valueBit and leafOwnedBit).
 	epoch uint64
 }
 
