@@ -1,0 +1,11 @@
+name = "juuri-formal"
+version = "0.1.0"
+defaultTargets = ["JuuriFormal"]
+
+[leanOptions]
+autoImplicit = false
+relaxedAutoImplicit = false
+
+[[lean_lib]]
+name = "JuuriFormal"
+
