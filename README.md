@@ -138,6 +138,8 @@ the layout and allocation tradeoffs.
 - [Design](docs/design.md): node layout, snapshots, and watch semantics.
 - [Benchmarks](docs/benchmarks.md): measurements, methodology, and reproduction.
 - [Development](docs/development.md): checks, fuzzing, and repository layout.
+- [Formal verification](formal/README.md): Lean proofs and TLA+ models of the
+  tree, its transactions, and its watch channels.
 
 ## License
 

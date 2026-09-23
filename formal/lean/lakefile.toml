@@ -1,0 +1,15 @@
+name = "juuri-formal"
+version = "0.1.0"
+defaultTargets = ["JuuriFormal"]
+
+[leanOptions]
+autoImplicit = false
+relaxedAutoImplicit = false
+
+[[lean_lib]]
+name = "JuuriFormal"
+
+# The executable model, for the conformance test in formal/conformance.
+[[lean_exe]]
+name = "conformance"
+root = "Conformance"
